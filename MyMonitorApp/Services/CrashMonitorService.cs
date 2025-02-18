@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,6 +15,9 @@ public class CrashMonitorService : IHostedService
     private readonly INotificationService _notificationService;
     private readonly string _appName = "MyApp";
     private readonly string _appPath = @"C:\Program Files\MyApp\MyApp.exe";
+    private readonly string _restartCountFile = @"C:\logs\restart-count.txt";
+    private const int MaxRestartAttempts = 3;
+    private const int ResetTimeMinutes = 60;
 
     public CrashMonitorService(ILogger<CrashMonitorService> logger, INotificationService notificationService)
     {
@@ -36,11 +40,23 @@ public class CrashMonitorService : IHostedService
             _logger.LogWarning($"クラッシュログが見つかりませんでした。");
         }
 
+        // 連続クラッシュ回数をチェック
+        int restartCount = GetRestartCount();
+        if (restartCount >= MaxRestartAttempts)
+        {
+            _logger.LogError($"🚨 {_appName} が {MaxRestartAttempts} 回連続でクラッシュしました！再起動を停止します。");
+            await _notificationService.SendAsync("MyApp 再起動ループ警告", $"{_appName} が {MaxRestartAttempts} 回連続でクラッシュしました。手動で確認してください。\n{crashDetails}");
+            return;
+        }
+
         // 既存のプロセスを Kill（存在しなくても問題なし）
         KillExistingProcess();
 
         // `MyApp` を再起動
         RestartApp();
+
+        // 連続クラッシュ回数を更新
+        UpdateRestartCount(restartCount + 1);
 
         // 通知送信
         string message = $"{_appName} がクラッシュしました。再起動しました。\n{crashDetails}";
@@ -82,6 +98,61 @@ public class CrashMonitorService : IHostedService
             _logger.LogError($"クラッシュログ取得中にエラー: {ex.Message}");
         }
         return string.Empty;
+    }
+
+    /// <summary>
+    /// 連続クラッシュ回数を取得
+    /// </summary>
+    private int GetRestartCount()
+    {
+        if (!File.Exists(_restartCountFile))
+        {
+            return 0;
+        }
+
+        try
+        {
+            string[] lines = File.ReadAllLines(_restartCountFile);
+            if (lines.Length < 2)
+            {
+                return 0;
+            }
+
+            int count = int.Parse(lines[0]);
+            DateTime lastRestartTime = DateTime.Parse(lines[1]);
+
+            // 一定時間（60 分）経過していたらリセット
+            if ((DateTime.Now - lastRestartTime).TotalMinutes > ResetTimeMinutes)
+            {
+                return 0;
+            }
+
+            return count;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"再起動回数の取得に失敗: {ex.Message}");
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// 連続クラッシュ回数を更新
+    /// </summary>
+    private void UpdateRestartCount(int count)
+    {
+        try
+        {
+            File.WriteAllLines(_restartCountFile, new[]
+            {
+                count.ToString(),
+                DateTime.Now.ToString()
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"再起動回数の記録に失敗: {ex.Message}");
+        }
     }
 
     /// <summary>
