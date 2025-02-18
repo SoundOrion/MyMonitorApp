@@ -60,6 +60,7 @@ public class CrashMonitorService : BackgroundService
             if ((entry.InstanceId == 1000 || entry.InstanceId == 1001 || entry.InstanceId == 1002 || entry.InstanceId == 7031) &&
                 entry.Message.Contains(_appName + ".exe"))
             {
+                _logger.LogError($"クラッシュ検出: {entry.TimeGenerated} | メッセージ: {entry.Message}");
                 return true;
             }
         }
