@@ -15,6 +15,15 @@ Log.Logger = new LoggerConfiguration()
 
 try
 {
+    const string mutexName = "Global\\MyMonitorAppMutex";
+    using Mutex mutex = new Mutex(true, mutexName, out bool isNewInstance);
+
+    if (!isNewInstance)
+    {
+        Log.Information("すでに別のインスタンスが実行中です。終了します。");
+        return; // 他のインスタンスが動作している場合、実行しない
+    }
+
     Log.Information("MyMonitorApp を開始...");
 
     var host = Host.CreateDefaultBuilder(args)
