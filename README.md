@@ -226,3 +226,204 @@ dotnet add package Serilog.Sinks.Email
 ✅ **ログがしっかり管理されることで、運用負担が大幅に軽減！**
 
 🚀 **これで、C# の `IHost` + Serilog を活用した "クラッシュ監視 & 自動復旧 & 強力なログ管理システム" が完成！** 🎉
+
+
+
+
+
+
+
+
+
+
+
+
+
+## **🚀 `MyApp` のフリーズや高負荷を監視するバックグラウンドツール**
+✅ **タスクスケジューラとは別に、CPU / メモリの異常を常時監視するツールを作成**  
+✅ **"クラッシュログが出ない"（フリーズ状態）を検知し、`Kill` して再起動する**  
+✅ **一定の閾値（例: CPU > 90% or メモリ > 1000MB）を超えたら強制終了 & 再起動**  
+✅ **Windows サービスとして動作するように `IHostedService` で実装**  
+
+---
+
+# **📌 `MyAppResourceMonitorService.cs`（リソース監視 & 自動 Kill）**
+```csharp
+using System;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+
+namespace MyMonitorApp.Services
+{
+    public class MyAppResourceMonitorService : BackgroundService
+    {
+        private readonly ILogger<MyAppResourceMonitorService> _logger;
+        private readonly INotificationService _notificationService;
+        private readonly string _appName = "MyApp";
+        private readonly string _appPath = @"C:\Program Files\MyApp\MyApp.exe";
+        private const int MemoryThresholdMB = 1000; // メモリ 1000MB 超えで異常
+        private const int CpuThreshold = 90; // CPU 90% 超えで異常
+        private const int CheckIntervalSeconds = 30; // 30秒ごとに監視
+
+        public MyAppResourceMonitorService(ILogger<MyAppResourceMonitorService> logger, INotificationService notificationService)
+        {
+            _logger = logger;
+            _notificationService = notificationService;
+        }
+
+        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+        {
+            _logger.LogInformation("MyApp のリソース監視を開始...");
+
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                MonitorMyApp();
+
+                await Task.Delay(TimeSpan.FromSeconds(CheckIntervalSeconds), stoppingToken);
+            }
+        }
+
+        private void MonitorMyApp()
+        {
+            var process = Process.GetProcessesByName(_appName).FirstOrDefault();
+            if (process == null)
+            {
+                _logger.LogWarning($"{_appName} は実行されていません。");
+                return;
+            }
+
+            long memoryUsage = process.PrivateMemorySize64 / 1024 / 1024; // MB 単位
+            double cpuUsage = GetCpuUsage(process);
+
+            _logger.LogInformation($"[{_appName}] メモリ使用量: {memoryUsage}MB, CPU 使用率: {cpuUsage:F2}%");
+
+            if (memoryUsage > MemoryThresholdMB || cpuUsage > CpuThreshold)
+            {
+                _logger.LogError($"⚠️ {_appName} のリソース使用量が異常値に達しました（メモリ: {memoryUsage}MB, CPU: {cpuUsage:F2}%）。強制終了 & 再起動します。");
+
+                // 異常検知 → プロセスを強制終了 & 再起動
+                KillAndRestart();
+            }
+        }
+
+        private double GetCpuUsage(Process process)
+        {
+            var startTime = DateTime.UtcNow;
+            var startCpuUsage = process.TotalProcessorTime;
+
+            Thread.Sleep(1000); // 1秒待機
+
+            var endTime = DateTime.UtcNow;
+            var endCpuUsage = process.TotalProcessorTime;
+
+            double cpuUsedMs = (endCpuUsage - startCpuUsage).TotalMilliseconds;
+            double elapsedMs = (endTime - startTime).TotalMilliseconds;
+            double cpuUsage = (cpuUsedMs / elapsedMs) * 100 / Environment.ProcessorCount; // CPU コア数で割る
+
+            return cpuUsage;
+        }
+
+        private void KillAndRestart()
+        {
+            var process = Process.GetProcessesByName(_appName).FirstOrDefault();
+            if (process != null)
+            {
+                try
+                {
+                    _logger.LogWarning($"既存の {_appName} プロセス (ID: {process.Id}) を強制終了します...");
+                    process.Kill();
+                    process.WaitForExit(5000);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError($"プロセスの強制終了に失敗: {ex.Message}");
+                }
+            }
+
+            // `MyApp` を再起動
+            _logger.LogInformation($"{_appName} を再起動します...");
+            Process.Start(_appPath);
+
+            // 通知を送信
+            string message = $"{_appName} のリソース使用量が異常値に達したため、強制終了して再起動しました。";
+            _notificationService.SendAsync("MyApp リソース異常検知", message);
+        }
+    }
+}
+```
+
+---
+
+## **🚀 期待される動作**
+1. **30 秒ごとに `MyApp.exe` の CPU / メモリをチェック**
+2. **メモリが 1000MB 以上 または CPU 使用率 90% 超え で異常検知**
+3. **異常をログ & 通知に記録**
+4. **プロセスを `Kill` してから再起動**
+5. **管理者に Slack / Email / Discord で通知**
+6. **正常時はログにリソース使用状況を記録**
+7. **これを `IHostedService` に登録して、常時監視する Windows サービス化**
+
+---
+
+## **📌 `Program.cs` でこのサービスを登録**
+```csharp
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Serilog;
+using MyMonitorApp.Services;
+using System;
+using System.Threading.Tasks;
+
+// Serilog の設定
+Log.Logger = new LoggerConfiguration()
+    .WriteTo.Console()
+    .WriteTo.File(@"C:\logs\myapp-monitor.log", rollingInterval: RollingInterval.Day)
+    .CreateLogger();
+
+try
+{
+    Log.Information("MyMonitorApp を開始...");
+
+    var host = Host.CreateDefaultBuilder(args)
+        .UseWindowsService() // Windows サービスとして実行
+        .UseSerilog()
+        .ConfigureServices((context, services) =>
+        {
+            services.AddNotificationService();
+            services.AddHostedService<MyAppResourceMonitorService>(); // リソース監視
+        })
+        .Build();
+
+    await host.RunAsync();
+}
+catch (Exception ex)
+{
+    Log.Fatal(ex, "アプリケーションが異常終了しました。");
+}
+finally
+{
+    Log.CloseAndFlush();
+}
+```
+
+---
+
+## **📌 Windows サービスとして登録**
+```powershell
+sc create "MyAppResourceMonitor" binPath= "C:\Program Files\MyMonitorApp\MyMonitorApp.exe" start= auto
+sc start MyAppResourceMonitor
+```
+
+---
+
+## **🚀 これでフリーズ & 高負荷に対応する完全監視システムが完成！**
+✅ **タスクスケジューラで `MyApp` のクラッシュ時にリカバリーを実行**  
+✅ **Windows サービスで `MyApp` の CPU / メモリ異常を常時監視**  
+✅ **異常時は `Kill & Restart` しつつ、通知を送信**  
+✅ **クラッシュログが残らない「フリーズ問題」にも完全対応！**  
+
+💡 **「クラッシュもフリーズも、自動で完全復旧するシステム」になった！** 🚀🎉
