@@ -5,6 +5,7 @@ using MyMonitorApp.Services;
 using Serilog;
 using System;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 
 // Serilog の設定
@@ -15,6 +16,8 @@ Log.Logger = new LoggerConfiguration()
 
 try
 {
+    Log.Information("MyMonitorApp を開始...");
+
     const string mutexName = "Global\\MyMonitorAppMutex";
     using Mutex mutex = new Mutex(true, mutexName, out bool isNewInstance);
 
@@ -24,17 +27,16 @@ try
         return; // 他のインスタンスが動作している場合、実行しない
     }
 
-    Log.Information("MyMonitorApp を開始...");
-
     var host = Host.CreateDefaultBuilder(args)
         .UseSerilog() // Serilog をログシステムに統合
         .ConfigureServices((context, services) =>
         {
-            services.AddSingleton<INotificationService, EmailNotificationService>(); // 通知サービス
+            services.AddNotificationService(); // 通知サービスの追加
             services.AddHostedService<CrashMonitorService>(); // クラッシュ監視
         })
         .Build();
 
+    // `using` の外で実行して Mutex を保持
     await host.RunAsync();
 }
 catch (Exception ex)
