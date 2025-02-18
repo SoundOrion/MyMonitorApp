@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Diagnostics;
-using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -9,15 +8,7 @@ using Microsoft.Extensions.Logging;
 
 namespace MyMonitorApp.Services;
 
-using System;
-using System.Diagnostics;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
-
-public class CrashMonitorService : BackgroundService
+public class CrashMonitorService : IHostedService
 {
     private readonly ILogger<CrashMonitorService> _logger;
     private readonly INotificationService _notificationService;
@@ -30,66 +21,56 @@ public class CrashMonitorService : BackgroundService
         _notificationService = notificationService;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public async Task StartAsync(CancellationToken cancellationToken)
     {
-        _logger.LogInformation("クラッシュ監視サービスを開始...");
+        _logger.LogInformation($"タスクスケジューラによる {_appName} のクラッシュ検知 - 即時再起動処理を開始");
 
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            if (CheckForCrash())
-            {
-                string message = $"{_appName} がクラッシュしました。再起動します。";
-                _logger.LogWarning(message);
+        // 既存のプロセスを Kill（存在しなくても問題なし）
+        KillExistingProcess();
 
-                // 通知送信
-                await _notificationService.SendAsync("MyApp クラッシュ通知", message);
+        // `MyApp` を再起動
+        RestartApp();
 
-                // プロセスを強制終了してから再起動
-                RestartApp();
-            }
+        // 通知送信
+        string message = $"{_appName} がクラッシュしました。再起動しました。";
+        await _notificationService.SendAsync("MyApp 再起動通知", message);
 
-            await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
-        }
+        _logger.LogInformation("処理完了 - アプリを終了");
     }
 
-    private bool CheckForCrash()
+    public Task StopAsync(CancellationToken cancellationToken)
     {
-        EventLog eventLog = new EventLog("Application");
-        foreach (EventLogEntry entry in eventLog.Entries)
+        return Task.CompletedTask; // タスクスケジューラ実行後に即終了
+    }
+
+    private void KillExistingProcess()
+    {
+        var processes = Process.GetProcessesByName(_appName);
+        if (processes.Any())
         {
-            if ((entry.InstanceId == 1000 || entry.InstanceId == 1001 || entry.InstanceId == 1002 || entry.InstanceId == 7031) &&
-                entry.Message.Contains(_appName + ".exe"))
+            foreach (var process in processes)
             {
-                _logger.LogError($"クラッシュ検出: {entry.TimeGenerated} | メッセージ: {entry.Message}");
-                return true;
+                try
+                {
+                    _logger.LogWarning($"既存の {_appName} プロセス (ID: {process.Id}) を強制終了します...");
+                    process.Kill();
+                    process.WaitForExit(5000);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError($"プロセスの強制終了に失敗: {ex.Message}");
+                }
             }
         }
-        return false;
+        else
+        {
+            _logger.LogInformation($"{_appName} のプロセスは存在しませんでした。");
+        }
     }
 
     private void RestartApp()
     {
-        _logger.LogInformation($"{_appName} を停止して再起動します...");
-
-        // 既存のプロセスを強制終了
-        foreach (var process in Process.GetProcessesByName(_appName))
-        {
-            try
-            {
-                _logger.LogWarning($"プロセス {process.Id} を強制終了します...");
-                process.Kill();
-                process.WaitForExit(5000);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError($"プロセスの終了に失敗: {ex.Message}");
-            }
-        }
-
-        // アプリケーションの再起動
+        _logger.LogInformation($"{_appName} を起動します...");
         Process.Start(_appPath);
-        _logger.LogInformation($"{_appName} を再起動しました。");
     }
 }
-
-
